@@ -3,6 +3,7 @@ import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import dotenv from 'dotenv';
+import { x402ProviderMiddleware } from './provider-adapter';
 
 dotenv.config();
 
@@ -15,13 +16,46 @@ const PACKAGE = process.env.PACKAGE_ID!;
 const POOL = process.env.POOL_ID!;
 const GATEWAY_ADDR = process.env.GATEWAY_ADDRESS!;
 const gatewayKeypair = Ed25519Keypair.fromSecretKey(process.env.GATEWAY_PRIVATE_KEY!);
+const PORT = process.env.PORT || '3000';
+
+const x402Config = {
+  poolId: POOL,
+  packageId: PACKAGE,
+  gatewayUrl: `http://localhost:${PORT}`,
+  minCost: BigInt(1_000_000),
+  network: 'sui:testnet',
+};
+
+async function proxyToProvider(provider: string, body: any): Promise<any> {
+  return {
+    status: 'proxied',
+    provider,
+    received: body,
+    message: 'This is a stub. Wire to real API here.',
+    timestamp: Date.now(),
+  };
+}
+
+// ── X402 PROTECTED ROUTE ──
+app.post('/api/:provider', x402ProviderMiddleware(x402Config), async (req, res) => {
+  const { provider } = req.params;
+  const apiResponse = await proxyToProvider(provider, req.body);
+  res.json(apiResponse);
+});
 
 // Health check
 app.get('/health', async (_req, res) => {
   res.json({ status: 'ok', pool: POOL, gateway: GATEWAY_ADDR });
 });
 
-// Check wallet balance (no gas needed)
+// Simple API proxy route (no x402 yet — for testing)
+app.post('/api/:provider', async (req, res) => {
+  const { provider } = req.params;
+  const apiResponse = await proxyToProvider(provider, req.body);
+  res.json(apiResponse);
+});
+
+// Check wallet balance (gasless view call)
 app.get('/balance/:wallet', async (req, res) => {
   const wallet = req.params.wallet;
   
@@ -36,7 +70,6 @@ app.get('/balance/:wallet', async (req, res) => {
     sender: GATEWAY_ADDR,
   });
 
-  // Parse the return value
   const returnVal = result.results?.[0]?.returnValues?.[0];
   let balance = 0;
   if (returnVal) {
@@ -47,7 +80,7 @@ app.get('/balance/:wallet', async (req, res) => {
   res.json({ wallet, balance });
 });
 
-// Settle payment on-chain (this costs gas)
+// Settle payment on-chain
 app.post('/settle', async (req, res) => {
   const { wallet, total_cost, provider_name, provider_addr, model_name, tokens_used, request_hash } = req.body;
 
@@ -59,15 +92,15 @@ app.post('/settle', async (req, res) => {
   tx.moveCall({
     target: `${PACKAGE}::seal_api_pool::authorize_call`,
     arguments: [
-      tx.object(POOL),                                    // pool
-      tx.pure.address(wallet),                            // wallet paying
-      tx.pure.u64(total_cost),                            // amount to deduct
-      tx.pure.vector('u8', Array.from(Buffer.from(provider_name))),  // provider name as bytes
-      tx.pure.address(provider_addr),                     // provider wallet to receive 99%
-      tx.pure.vector('u8', Array.from(Buffer.from(request_hash || 'default'))), // request hash
-      tx.pure.vector('u8', Array.from(Buffer.from(model_name || 'unknown'))),   // model name
-      tx.pure.u64(tokens_used || 0),                      // token count
-      tx.object('0x6'),                                   // clock
+      tx.object(POOL),
+      tx.pure.address(wallet),
+      tx.pure.u64(total_cost),
+      tx.pure.vector('u8', Array.from(Buffer.from(provider_name))),
+      tx.pure.address(provider_addr),
+      tx.pure.vector('u8', Array.from(Buffer.from(request_hash || 'default'))),
+      tx.pure.vector('u8', Array.from(Buffer.from(model_name || 'unknown'))),
+      tx.pure.u64(tokens_used || 0),
+      tx.object('0x6'),
     ],
   });
 
@@ -78,7 +111,6 @@ app.post('/settle', async (req, res) => {
       options: { showEffects: true, showEvents: true },
     });
 
-    // Find the receipt event
     const receiptEvent = result.events?.find(e => 
       e.type.includes('ApiCallReceiptEvent')
     );
@@ -93,8 +125,8 @@ app.post('/settle', async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT, () => {
-  console.log(`SEAL Gateway running on http://localhost:${process.env.PORT}`);
+app.listen(PORT, () => {
+  console.log(`SEAL Gateway running on http://localhost:${PORT}`);
   console.log(`Pool: ${POOL}`);
   console.log(`Gateway: ${GATEWAY_ADDR}`);
 });
