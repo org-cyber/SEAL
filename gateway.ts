@@ -27,13 +27,48 @@ const x402Config = {
 };
 
 async function proxyToProvider(provider: string, body: any): Promise<any> {
-  return {
-    status: 'proxied',
-    provider,
-    received: body,
-    message: 'This is a stub. Wire to real API here.',
-    timestamp: Date.now(),
-  };
+  const prompt = body.prompt || 'Hello';
+
+  try {
+    const response = await fetch('http://localhost:8080/completion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: prompt,
+        n_predict: 128,
+        temperature: 0.7,
+        stop: ["</s>", "User:", "Human:"],
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`llama.cpp error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    return {
+      status: 'success',
+      provider,
+      seal: { settled: true },
+      ai: {
+        model: 'qwen2.5-coder-1.5b-instruct-q4_0',
+        content: data.content?.trim() || 'No response',
+        tokens_used: data.tokens_evaluated || 0,
+      },
+      timestamp: Date.now(),
+    };
+
+  } catch (err: any) {
+    return {
+      status: 'error',
+      provider,
+      message: 'llama.cpp server not running on port 8080',
+      error: err.message,
+      timestamp: Date.now(),
+    };
+  }
 }
 
 // ── X402 PROTECTED ROUTE ──
