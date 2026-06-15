@@ -22,15 +22,23 @@ interface QuickSetupParams {
 }
 
 export async function quickSetup(params: QuickSetupParams): Promise<string> {
-  const tx = new Transaction();
+  
+const tx = new Transaction();
 
-  // 1. Split coin for deposit
-  const [paymentCoin] = tx.splitCoins(
-    tx.object(params.coinObjectId),
-    [tx.pure.u64(params.depositAmount)]
-  );
+// Fetch coin details for gas payment
+const coinObj = await client.getObject({
+  id: params.coinObjectId,
+  options: { showContent: true },
+});
 
-  // 2. Deposit with source = manual
+
+// 1. Split coin for deposit
+const [paymentCoin] = tx.splitCoins(
+  tx.object(params.coinObjectId),
+  [tx.pure.u64(params.depositAmount)]
+);
+
+	// 2. Deposit with source = manual
   tx.moveCall({
     target: `${PACKAGE}::seal_api_pool::deposit_with_source`,
     arguments: [
