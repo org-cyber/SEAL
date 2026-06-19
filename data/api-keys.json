@@ -1,0 +1,9 @@
+{
+  "seal_KW2f6kZWUqXMgsct4sf2oZU0BaX2VSQ1": {
+    "wallet": "0x28441bfc3fe1f98e0dec5755322210c24d67054a23bacec2299f6d2f88fe8d47",
+    "label": "demo",
+    "createdAt": 1781809811014,
+    "revoked": false,
+    "allowApiKeyResume": true
+  }
+}

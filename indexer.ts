@@ -8,7 +8,7 @@ dotenv.config();
 const client = new SuiClient({ url: process.env.SUI_RPC || getFullnodeUrl('testnet') });
 const PACKAGE = process.env.PACKAGE_ID!;
 
-const CACHE_FILE = join(process.cwd(), 'events-cache.json');
+const CACHE_FILE = join(process.cwd(), 'data', 'events-cache.json');
 const POLL_INTERVAL = 30000; // 30 seconds
 
 // Event types we care about
@@ -25,20 +25,21 @@ const EVENT_TYPES = [
   `${PACKAGE}::seal_api_pool::LowBalanceAlertEvent`,
 ];
 
+// ── FIXED: Per-type cursors instead of single global cursor ─────────────────
 interface CachedEvents {
-  lastCursor: string | null;
+  cursors: Record<string, string | null>;  // eventType → cursor
   events: SuiEvent[];
   lastUpdated: number;
 }
 
 function loadCache(): CachedEvents {
   if (!existsSync(CACHE_FILE)) {
-    return { lastCursor: null, events: [], lastUpdated: 0 };
+    return { cursors: {}, events: [], lastUpdated: 0 };
   }
   try {
     return JSON.parse(readFileSync(CACHE_FILE, 'utf-8'));
   } catch {
-    return { lastCursor: null, events: [], lastUpdated: 0 };
+    return { cursors: {}, events: [], lastUpdated: 0 };
   }
 }
 
@@ -46,38 +47,39 @@ function saveCache(cache: CachedEvents) {
   writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
 }
 
-
+// ── BACKFILL ────────────────────────────────────────────────────────────────
+// Fetch all historical events per type, oldest first.
 
 async function backfillEvents() {
-  console.log('Backfilling historical events...');
+  console.log('[INDEXER] Backfilling historical events...');
   const cache = loadCache();
-  
+
   for (const eventType of EVENT_TYPES) {
     try {
       let hasNext = true;
       let cursor: string | null | undefined = undefined;
-      
+
       while (hasNext) {
         const response = await client.queryEvents({
           query: { MoveEventType: eventType },
           cursor,
           limit: 50,
-          order: 'ascending', // oldest first
+          order: 'ascending',
         });
 
         if (response.data.length > 0) {
           const existingKeys = new Set(cache.events.map(e => `${e.id.txDigest}-${e.id.eventSeq}`));
           const newEvents = response.data.filter(e => !existingKeys.has(`${e.id.txDigest}-${e.id.eventSeq}`));
-          
+
           cache.events.push(...newEvents);
-          console.log(`[${eventType.split('::').pop()}] +${newEvents.length} historical events`);
+          console.log(`[INDEXER] [${eventType.split('::').pop()}] +${newEvents.length} historical events`);
         }
 
         hasNext = response.hasNextPage;
         cursor = response.nextCursor;
       }
     } catch (err) {
-      console.error(`Failed to backfill ${eventType}:`, err);
+      console.error(`[INDEXER] Failed to backfill ${eventType}:`, err);
     }
   }
 
@@ -85,39 +87,42 @@ async function backfillEvents() {
   cache.events.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
   cache.lastUpdated = Date.now();
   saveCache(cache);
-  console.log(`Backfill complete. Total events: ${cache.events.length}`);
+  console.log(`[INDEXER] Backfill complete. Total events: ${cache.events.length}`);
 }
 
+// ── POLL ────────────────────────────────────────────────────────────────────
+// Poll each event type from its LAST cursor, not a shared one.
 
 async function pollEvents() {
   const cache = loadCache();
-  
+
   for (const eventType of EVENT_TYPES) {
     try {
+      const lastCursor = cache.cursors[eventType];
+
       const response = await client.queryEvents({
         query: { MoveEventType: eventType },
-        cursor: cache.lastCursor,
+        cursor: lastCursor || undefined,
         limit: 50,
         order: 'descending',
       });
 
       if (response.data.length > 0) {
-        // Merge new events, deduplicate by tx digest + event seq
         const existingKeys = new Set(cache.events.map(e => `${e.id.txDigest}-${e.id.eventSeq}`));
         const newEvents = response.data.filter(e => !existingKeys.has(`${e.id.txDigest}-${e.id.eventSeq}`));
-        
+
         cache.events.unshift(...newEvents);
-        cache.lastCursor = response.nextCursor || cache.lastCursor;
+        cache.cursors[eventType] = response.nextCursor || lastCursor;
         cache.lastUpdated = Date.now();
-        
-        console.log(`[${eventType.split('::').pop()}] +${newEvents.length} events`);
+
+        console.log(`[INDEXER] [${eventType.split('::').pop()}] +${newEvents.length} events`);
       }
     } catch (err) {
-      console.error(`Failed to poll ${eventType}:`, err);
+      console.error(`[INDEXER] Failed to poll ${eventType}:`, err);
     }
   }
 
-  // Keep last 1000 events to prevent unbounded growth
+  // Cap at 1000 events
   if (cache.events.length > 1000) {
     cache.events = cache.events.slice(0, 1000);
   }
@@ -125,12 +130,13 @@ async function pollEvents() {
   saveCache(cache);
 }
 
-// Export for use in gateway
+// ── EXPORTS ────────────────────────────────────────────────────────────────
+
 export function getEventsForWallet(wallet: string): SuiEvent[] {
   const cache = loadCache();
   return cache.events.filter(e => {
     const parsed = e.parsedJson as any;
-    return parsed?.wallet === wallet || 
+    return parsed?.wallet === wallet ||
            parsed?.team_id === wallet ||
            parsed?.member === wallet ||
            parsed?.admin === wallet;
@@ -160,16 +166,17 @@ export function getStats(): { totalEvents: number; lastUpdated: number; eventTyp
   };
 }
 
-// Start polling
+// ── START ────────────────────────────────────────────────────────────────────
+
 export async function startIndexer() {
-  console.log('Event indexer starting...');
-  await backfillEvents(); // backfill first
-  pollEvents(); // then start polling
+  console.log('[INDEXER] Starting...');
+  await backfillEvents();
+  await pollEvents();
   setInterval(pollEvents, POLL_INTERVAL);
 }
 
 // CLI mode
 if (require.main === module) {
   startIndexer();
-  console.log('Polling every 30s. Press Ctrl+C to stop.');
+  console.log('[INDEXER] Polling every 30s. Press Ctrl+C to stop.');
 }
